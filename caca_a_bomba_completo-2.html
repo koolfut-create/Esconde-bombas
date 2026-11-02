@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Caça à Bomba</title>
+<style>
+*{box-sizing:border-box}body{margin:0;padding:12px;background:#101a30;color:#fff;font-family:Arial,sans-serif;text-align:center}
+h1{color:#ffd43b;font-size:24px;margin:8px}h2{font-size:18px}
+.card{max-width:440px;margin:12px auto;padding:14px;background:#1d2b49;border:1px solid #526b91;border-radius:12px}
+input,button{width:100%;padding:12px;margin:5px 0;border:0;border-radius:8px;font-size:16px}
+input{background:#fff;color:#17213a}button{background:#ffd43b;color:#17213a;font-weight:bold;cursor:pointer}
+button.secondary{background:#5275b8;color:white}button:disabled{opacity:.5}
+.hidden{display:none}.muted{color:#c5d0e3;font-size:13px}.status{min-height:24px;margin:10px}
+.boards{display:grid;grid-template-columns:1fr 1fr;gap:8px;max-width:440px;margin:auto}
+.board-panel{padding:8px;border:2px solid #526b91;border-radius:10px;background:#1d2b49;min-width:0}
+.board-panel.active{border-color:#ffd43b;box-shadow:0 0 10px #ffd43b}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:4px}
+.cell{padding:0;aspect-ratio:1;background:#5275b8;color:white;font-size:clamp(16px,5vw,24px);margin:0}
+.cell.hit{background:#bd2929}.cell.miss{background:#526078}.cell.mine{background:#b47b19}
+@media(max-width:350px){.boards{grid-template-columns:1fr}.cell{font-size:22px}}
+</style>
+</head>
+<body>
+<h1>💣 CAÇA À BOMBA 💣</h1>
+<section id="auth" class="card">
+<h2>Entrar ou criar conta</h2>
+<input id="email" type="email" placeholder="Seu e-mail" autocomplete="email">
+<input id="password" type="password" placeholder="Senha (mínimo 6 caracteres)" autocomplete="current-password">
+<input id="nickname" type="text" maxlength="18" placeholder="Apelido (para novo cadastro)">
+<button onclick="register()">CRIAR CONTA</button>
+<button class="secondary" onclick="login()">ENTRAR</button>
+<button class="secondary" onclick="resetPassword()">ESQUECI MINHA SENHA</button>
+<div id="authMsg" class="status"></div>
+<p class="muted">Use seu próprio e-mail. Nunca compartilhe sua senha.</p>
+</section>
+
+<section id="menu" class="card hidden">
+<h2>Olá, <span id="hello"></span>!</h2>
+<button onclick="startLocal()">DOIS JOGADORES NO MESMO CELULAR</button>
+<button class="secondary" onclick="findOnline()">JOGAR ONLINE</button>
+<button class="secondary" onclick="logout()">SAIR DA CONTA</button>
+<div id="menuMsg" class="status"></div>
+<button id="localFallback" class="hidden" onclick="cancelOnlineAndPlayLocal()">JOGAR NO MESMO CELULAR</button>
+</section>
+
+<section id="game" class="hidden">
+<div class="card">
+<div id="score">Jogador 1: 0/3 | Jogador 2: 0/3</div>
+<div id="message" class="status">Prepare as bombas.</div>
+<div id="turn" class="muted"></div>
+</div>
+<div class="boards">
+<div class="board-panel" id="panel0"><h2 id="name0">🔵 JOGADOR 1</h2><div class="grid" id="board0"></div></div>
+<div class="board-panel" id="panel1"><h2 id="name1">🔴 JOGADOR 2</h2><div class="grid" id="board1"></div></div>
+</div>
+<div class="card"><button onclick="backToMenu()">VOLTAR AO MENU</button></div>
+</section>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script>
+const firebaseConfig = {
+  apiKey: "AIzaSyBYxKkW7NG8Tky-xnQ-4gCz6rxXYKPFVGY",
+  authDomain: "esconde-bombas.firebaseapp.com",
+  databaseURL: "https://esconde-bombas-default-rtdb.firebaseio.com",
+  projectId: "esconde-bombas",
+  storageBucket: "esconde-bombas.firebasestorage.app",
+  messagingSenderId: "52588981638",
+  appId: "1:52588981638:web:80a866938f320c09c69007",
+  measurementId: "G-3K971JB9X1"
+};
+firebase.initializeApp(firebaseConfig);
+const auth=firebase.auth(), db=firebase.database();
+let currentUser=null, nickname="", mode="local", game=null, gameRef=null, gameListener=null, queueRef=null, queueTimer=null;
+const $=id=>document.getElementById(id);
+function show(id){["auth","menu","game"].forEach(x=>$(x).classList.toggle("hidden",x!==id))}
+function msg(id,t){$(id).textContent=t}
+async function register(){
+ const email=$("email").value.trim().toLowerCase();
+ const pass=$("password").value;
+ const nick=$("nickname").value.trim();
+ if(!email||!email.includes("@")||pass.length<6||!nick){
+  msg("authMsg","Preencha um e-mail válido, senha com pelo menos 6 caracteres e apelido.");
+  return;
+ }
+ msg("authMsg","Criando sua conta...");
+ try{
+  const credential=await auth.createUserWithEmailAndPassword(email,pass);
+  currentUser=credential.user;nickname=nick;
+  $("hello").textContent=nickname;show("menu");
+  msg("menuMsg","Conta criada! Salvando seu apelido...");
+  credential.user.updateProfile({displayName:nick}).catch(console.warn);
+  const save=db.ref("usuarios/"+credential.user.uid).set({
+   apelido:nick,email:email,criadoEm:firebase.database.ServerValue.TIMESTAMP
+  });
+  const timeout=new Promise((_,reject)=>setTimeout(()=>reject(new Error("Tempo esgotado ao salvar o perfil")),8000));
+  Promise.race([save,timeout]).then(()=>msg("menuMsg","Conta criada e apelido salvo!"))
+   .catch(e=>{
+    console.warn("Perfil não salvo:",e);
+    msg("menuMsg","Conta criada e login realizado. O banco demorou ou recusou salvar o apelido; você pode continuar no modo local.");
+   });
+ }catch(e){
+  console.error("Erro no cadastro:",e);
+  if(e.code==="auth/email-already-in-use")msg("authMsg","Este e-mail já possui conta. Use ENTRAR ou ESQUECI MINHA SENHA.");
+  else msg("authMsg",friendly(e));
+ }
+}
+async function login(){
+ const email=$("email").value.trim().toLowerCase();
+ const pass=$("password").value;
+ if(!email||!pass){msg("authMsg","Digite seu e-mail e sua senha.");return}
+ msg("authMsg","Verificando acesso...");
+ try{
+  await auth.signInWithEmailAndPassword(email,pass);
+  msg("authMsg","Acesso autorizado!");
+ }catch(e){
+  console.error("Erro no login:",e);
+  msg("authMsg",friendly(e));
+ }
+}
+async function resetPassword(){
+ const email=$("email").value.trim();
+ if(!email){msg("authMsg","Digite seu e-mail no campo acima e tente novamente.");return}
+ try{
+  await auth.sendPasswordResetEmail(email);
+  msg("authMsg","Enviamos um link para redefinir a senha. Confira sua caixa de entrada e o spam.");
+ }catch(e){msg("authMsg",friendly(e))}
+}
+function friendly(e){
+ const messages={
+  "auth/email-already-in-use":"Este e-mail já possui conta. Use ENTRAR ou ESQUECI MINHA SENHA.",
+  "auth/invalid-email":"O formato do e-mail é inválido.",
+  "auth/weak-password":"A senha precisa ter pelo menos 6 caracteres.",
+  "auth/user-not-found":"Não existe conta com esse e-mail.",
+  "auth/wrong-password":"Senha incorreta. Use ESQUECI MINHA SENHA se não lembrar.",
+  "auth/invalid-credential":"Não foi possível entrar. Confira o e-mail e a senha ou redefina a senha.",
+  "auth/too-many-requests":"Muitas tentativas. Aguarde alguns minutos antes de tentar novamente.",
+  "auth/user-disabled":"Esta conta está desativada.",
+  "auth/network-request-failed":"Falha de conexão. Verifique a internet.",
+  "auth/missing-email":"Digite seu e-mail.",
+  "auth/operation-not-allowed":"Ative o método E-mail/senha em Firebase Authentication > Sign-in method.",
+  "auth/invalid-api-key":"A chave do Firebase está incorreta. Confira a configuração do projeto."
+ };
+ return messages[e.code]||("Erro ("+(e.code||"desconhecido")+"): "+(e.message||"Tente novamente."));
+}
+auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).catch(console.warn);
+auth.onAuthStateChanged(user=>{
+ currentUser=user;
+ if(!user){nickname="";show("auth");return}
+ nickname=user.displayName||((user.email||"jogador").split("@")[0]);
+ $("hello").textContent=nickname;
+ show("menu");
+ // Carrega o apelido em segundo plano para não deixar a tela presa.
+ db.ref("usuarios/"+user.uid+"/apelido").once("value")
+  .then(s=>{if(s.val()){nickname=s.val();$("hello").textContent=nickname;}})
+  .catch(e=>{
+   console.warn("Não foi possível carregar o apelido:",e);
+   msg("menuMsg","Você entrou. Não foi possível carregar o apelido salvo; o modo local continua disponível.");
+  });
+});
+async function logout(){await auth.signOut()}
+let audioCtx=null;
+function playTone(freq,duration,type="sine",volume=0.12){
+ try{
+  audioCtx=audioCtx||new (window.AudioContext||window.webkitAudioContext)();
+  const osc=audioCtx.createOscillator(),gain=audioCtx.createGain();
+  osc.type=type;osc.frequency.value=freq;gain.gain.value=volume;
+  osc.connect(gain);gain.connect(audioCtx.destination);
+  osc.start();gain.gain.exponentialRampToValueAtTime(0.001,audioCtx.currentTime+duration);
+  osc.stop(audioCtx.currentTime+duration);
+ }catch(e){console.warn("Som indisponível:",e)}
+}
+function soundBomb(){playTone(95,.45,"sawtooth",.18);setTimeout(()=>playTone(65,.35,"square",.12),100)}
+function soundSafe(){playTone(660,.12,"sine",.10);setTimeout(()=>playTone(880,.16,"sine",.10),120)}
+function emptyGame(names){return {phase:"setup",turn:0,selected:0,bombs:[[],[]],tries:[[],[]],names,createdAt:Date.now()}}
+function startLocal(){$("localFallback").classList.add("hidden");mode="local";game=emptyGame([nickname,"Jogador 2"]);show("game");render()}
+async function cancelOnlineAndPlayLocal(){cleanupOnline();$("localFallback").classList.add("hidden");startLocal()}
+function backToMenu(){cleanupOnline();show("menu")}
+function cleanupOnline(){
+ if(gameRef&&gameListener)gameRef.off("value",gameListener);
+ gameRef=null;gameListener=null;
+ if(queueTimer)clearTimeout(queueTimer);queueTimer=null;
+ if(queueRef){queueRef.remove().catch(()=>{});queueRef=null}
+}
+async function findOnline(){
+ mode="online";$("localFallback").classList.remove("hidden");msg("menuMsg","Procurando adversário por até 30 segundos...");
+ const uid=currentUser.uid, myRef=db.ref("fila/"+uid);queueRef=myRef;
+ try{
+  await myRef.set({apelido:nickname,status:"waiting",createdAt:firebase.database.ServerValue.TIMESTAMP});
+  const snap=await db.ref("fila").once("value"), entries=snap.val()||{};
+  let opponent=null;
+  for(const [id,item] of Object.entries(entries)){
+   if(id!==uid&&item&&item.status==="waiting"&&Date.now()-(item.createdAt||0)<45000){opponent=id;break}
+  }
+  if(opponent){
+   const gameId=db.ref("partidas").push().key;
+   const oppRef=db.ref("fila/"+opponent);
+   const claim=await oppRef.transaction(v=>{
+    if(v&&v.status==="waiting"){v.status="matched";v.gameId=gameId;v.opponent=uid;v.opponentName=nickname;return v}return;
+   });
+   if(claim.committed){
+    const g=emptyGame([nickname,claim.snapshot.val().apelido||"Adversário"]);
+    g.players=[uid,opponent];g.host=uid;
+    await db.ref("partidas/"+gameId).set(g);
+    await myRef.update({status:"matched",gameId,opponent,opponentName:g.names[1]});
+    enterOnline(gameId);return;
+   }
+  }
+  queueTimer=setTimeout(async()=>{
+  msg("menuMsg","Não encontramos adversário em 30 segundos. Você pode jogar localmente.");
+  if(queueRef)await queueRef.remove().catch(()=>{});
+  queueRef=null;$("localFallback").classList.remove("hidden");
+ },30000);
+  myRef.on("value",s=>{const v=s.val();if(v&&v.status==="matched"&&v.gameId){clearTimeout(queueTimer);enterOnline(v.gameId)}});
+ }catch(e){msg("menuMsg","Falha na busca: "+e.message)}
+}
+function enterOnline(id){
+ $("localFallback").classList.add("hidden");
+ if(queueRef){queueRef.off();queueRef=null}
+ if(queueTimer)clearTimeout(queueTimer);
+ gameRef=db.ref("partidas/"+id);
+ gameListener=gameRef.on("value",s=>{if(!s.exists())return;game=s.val();mode="online";show("game");render()});
+}
+function saveGame(){if(mode==="online"&&gameRef)gameRef.set(game).catch(e=>msg("message","Erro ao sincronizar: "+e.message));else render()}
+function render(){
+ if(!game)return;
+ $("score").textContent=`🔵 ${game.names[0]}: ${game.tries[0].filter(x=>x.hit).length}/3 | 🔴 ${game.names[1]}: ${game.tries[1].filter(x=>x.hit).length}/3`;
+ $("name0").textContent="🔵 "+game.names[0];$("name1").textContent="🔴 "+game.names[1];
+ $("panel0").classList.toggle("active",game.turn===0);$("panel1").classList.toggle("active",game.turn===1);
+ if(game.phase==="setup"){$("message").textContent=game.names[game.turn]+": escolha "+(3-game.selected)+" bombas."; $("turn").textContent="Fase de preparação";}
+ else if(game.phase==="play"){$("message").textContent="Encontre as bombas do adversário!";$("turn").textContent="Vez de "+game.names[game.turn]}
+ else {$("message").textContent=game.names[game.winner]+" venceu!";$("turn").textContent="Partida encerrada"}
+ for(let owner=0;owner<2;owner++){
+  const el=$("board"+owner);el.innerHTML="";
+  for(let pos=0;pos<16;pos++){
+   const b=document.createElement("button");b.className="cell";b.type="button";
+   const attempt=game.tries[1-owner].find(x=>x.pos===pos);
+   if(game.phase==="setup"){
+    b.textContent=(owner===game.turn&&game.bombs[owner].includes(pos))?"💣":"❔";
+    b.disabled=owner!==game.turn||game.phase!=="setup";
+    if(owner===game.turn)b.onclick=()=>chooseBomb(pos);
+   }else{
+    if(attempt){b.textContent=attempt.hit?"💣":"✖";b.classList.add(attempt.hit?"hit":"miss");b.disabled=true}
+    else{b.textContent="❔";b.disabled=game.phase!=="play"||owner!==1-game.turn;b.onclick=()=>play(pos)}
+   }
+   el.appendChild(b);
+  }
+ }
+}
+function chooseBomb(pos){
+ if(!game||game.phase!=="setup"||game.bombs[game.turn].includes(pos)||game.selected>=3)return;
+ game.bombs[game.turn].push(pos);game.selected++;
+ if(game.selected===3){if(game.turn===0){game.turn=1;game.selected=0}else{game.turn=0;game.selected=0;game.phase="play"}}
+ saveGame();
+}
+function play(pos){
+ if(!game||game.phase!=="play")return;
+ const a=game.turn,d=1-a;if(game.tries[a].some(x=>x.pos===pos))return;
+ const hit=game.bombs[d].includes(pos);game.tries[a].push({pos,hit});
+ if(hit)soundBomb();else soundSafe();
+ if(hit&&game.tries[a].filter(x=>x.hit).length===3){game.phase="end";game.winner=d}
+ else game.turn=d;
+ saveGame();
+}
+</script>
+</body>
+</html>
